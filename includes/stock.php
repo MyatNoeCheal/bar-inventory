@@ -11,7 +11,7 @@ function get_stock_map(PDO $conn, ?int $productId = null): array
         COALESCE(d.physical_closing, 0)
         + COALESCE((SELECT SUM(pi.quantity) FROM purchase_items pi
                     JOIN purchases pu ON pu.purchase_id = pi.purchase_id
-                    WHERE pi.product_id = p.product_id
+                    WHERE pi.product_id = p.product_id AND pu.status = 'completed'
                       AND (d.inventory_date IS NULL OR DATE(pu.purchase_date) > d.inventory_date)), 0)
         - COALESCE((SELECT SUM(si.quantity) FROM sale_items si
                     JOIN sales s ON s.sale_id = si.sale_id
@@ -54,7 +54,7 @@ function get_latest_cost(PDO $conn, int $productId): float
     $st = $conn->prepare(
         'SELECT pi.unit_price FROM purchase_items pi
          JOIN purchases pu ON pu.purchase_id = pi.purchase_id
-         WHERE pi.product_id = ?
+         WHERE pi.product_id = ? AND pu.status = \'completed\'
          ORDER BY pu.purchase_date DESC, pi.purchase_item_id DESC
          LIMIT 1'
     );
@@ -83,7 +83,7 @@ function get_daily_figures(PDO $conn, string $date): array
 
     $purch = fn($c) => "COALESCE((SELECT SUM(pi.quantity) FROM purchase_items pi
                 JOIN purchases pu ON pu.purchase_id = pi.purchase_id
-                WHERE pi.product_id = p.product_id AND " . $c('DATE(pu.purchase_date)') . "), 0)";
+                WHERE pi.product_id = p.product_id AND pu.status = 'completed' AND " . $c('DATE(pu.purchase_date)') . "), 0)";
     $sales = fn($c) => "COALESCE((SELECT SUM(si.quantity) FROM sale_items si
                 JOIN sales s ON s.sale_id = si.sale_id
                 WHERE si.product_id = p.product_id AND s.status = 'completed' AND " . $c('DATE(s.sale_date)') . "), 0)";
@@ -116,5 +116,27 @@ function get_daily_figures(PDO $conn, string $date): array
         $row['expected'] = $row['opening'] + $row['purchases'] - $row['sales'] - $row['foc'] + $row['adjustments'];
         $out[(int)$r['product_id']] = $row;
     }
+    return $out;
+}
+
+/**
+ * Products whose latest daily count is on or after $date ('Y-m-d').
+ * A counted day is closed: stock is rebuilt from the count, so a movement dated
+ * on or before it would be saved but never change stock. Callers must refuse it.
+ * Returns [product_id => 'Y-m-d' latest count date].
+ */
+function get_closed_products(PDO $conn, array $productIds, string $date): array
+{
+    $productIds = array_values(array_unique(array_map('intval', $productIds)));
+    if (!$productIds) return [];
+    $in = implode(',', array_fill(0, count($productIds), '?'));
+    $st = $conn->prepare(
+        "SELECT product_id, MAX(inventory_date) AS d
+         FROM daily_inventory WHERE product_id IN ($in)
+         GROUP BY product_id HAVING MAX(inventory_date) >= ?"
+    );
+    $st->execute(array_merge($productIds, [$date]));
+    $out = [];
+    foreach ($st->fetchAll() as $r) $out[(int)$r['product_id']] = $r['d'];
     return $out;
 }

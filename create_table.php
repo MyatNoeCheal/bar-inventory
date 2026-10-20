@@ -139,6 +139,10 @@ try {
             purchase_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             total_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00,
             description TEXT NULL,
+
+            status ENUM('completed', 'voided')
+                NOT NULL DEFAULT 'completed',
+
             created_by INT UNSIGNED NOT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

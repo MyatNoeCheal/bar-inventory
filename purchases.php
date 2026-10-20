@@ -20,7 +20,10 @@ $st = $conn->prepare($sql);
 $st->execute($params);
 $rows = $st->fetchAll();
 
-$grand = array_sum(array_column($rows, 'total_amount'));
+$grand = 0;
+foreach ($rows as $r) {
+    if ($r['status'] === 'completed') $grand += $r['total_amount'];
+}
 $suppliers = $conn->query('SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name')->fetchAll();
 ?>
 
@@ -41,24 +44,25 @@ $suppliers = $conn->query('SELECT supplier_id, supplier_name FROM suppliers ORDE
 
 <table>
     <thead>
-        <tr><th>#</th><th>Date</th><th>Supplier</th><th>Items</th><th>Total</th><th>By</th><th></th></tr>
+        <tr><th>#</th><th>Date</th><th>Supplier</th><th>Items</th><th>Total</th><th>Status</th><th>By</th><th></th></tr>
     </thead>
     <tbody>
-    <?php foreach ($rows as $r): ?>
-        <tr>
+    <?php foreach ($rows as $r): $void = $r['status'] === 'voided'; ?>
+        <tr style="<?= $void ? 'opacity:.55' : '' ?>">
             <td><?= str_pad($r['purchase_id'], 5, '0', STR_PAD_LEFT) ?></td>
             <td><?= e(date('d-M-Y H:i', strtotime($r['purchase_date']))) ?></td>
             <td><?= e($r['supplier_name'] ?? '—') ?></td>
             <td><?= (int)$r['item_count'] ?></td>
             <td><?= money($r['total_amount']) ?></td>
+            <td><span class="badge <?= $void ? 'badge-off' : '' ?>"><?= e(ucfirst($r['status'])) ?></span></td>
             <td><?= e($r['full_name']) ?></td>
             <td><a href="purchase_view.php?id=<?= (int)$r['purchase_id'] ?>">View</a></td>
         </tr>
     <?php endforeach; ?>
     <?php if (!$rows): ?>
-        <tr><td colspan="7" class="muted">No purchases in this period.</td></tr>
+        <tr><td colspan="8" class="muted">No purchases in this period.</td></tr>
     <?php else: ?>
-        <tr><th colspan="4" style="text-align:right">Total</th><th><?= money($grand) ?></th><th colspan="2"></th></tr>
+        <tr><th colspan="4" style="text-align:right">Total (completed)</th><th><?= money($grand) ?></th><th colspan="3"></th></tr>
     <?php endif; ?>
     </tbody>
 </table>

@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/auth/check_auth.php';
+require_once __DIR__ . '/includes/stock.php';
 
 $suppliers = $conn->query('SELECT supplier_id, supplier_name FROM suppliers WHERE is_active = 1 ORDER BY supplier_name')->fetchAll();
 $products  = $conn->query(
@@ -63,6 +64,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$items && !$errors) $errors[] = 'Add at least one product.';
     if (!$rows) $rows = [['product_id' => '', 'quantity' => '', 'unit_price' => '']];
+
+    // A day that has already been counted is closed for that product
+    if (!$errors) {
+        $names = [];
+        foreach ($products as $p) {
+            $names[(int)$p['product_id']] = $p['product_name'] . ($p['size_code'] ? ' ' . $p['size_code'] : '');
+        }
+        foreach (get_closed_products($conn, array_column($items, 'product_id'), $dt->format('Y-m-d')) as $pid => $d) {
+            $errors[] = $names[$pid] . ': already counted on ' . date('d-M-Y', strtotime($d)) . ', so that date is closed. Use a later date.';
+        }
+    }
 
     if (!$errors) {
         $conn->beginTransaction();

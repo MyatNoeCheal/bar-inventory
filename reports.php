@@ -69,7 +69,7 @@ case 'daily':
     break;
 
 case 'purchases':
-    $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to));
+    $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to)) . ' (completed purchases only)';
     $st = $conn->prepare(
         "SELECT pu.purchase_date, pu.purchase_id, COALESCE(s.supplier_name, '-'), $pname, i.quantity, i.unit_price, i.subtotal
          FROM purchase_items i
@@ -77,7 +77,7 @@ case 'purchases':
          LEFT JOIN suppliers s ON s.supplier_id = pu.supplier_id
          JOIN products p ON p.product_id = i.product_id
          LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
-         WHERE DATE(pu.purchase_date) BETWEEN ? AND ?
+         WHERE pu.status = 'completed' AND DATE(pu.purchase_date) BETWEEN ? AND ?
          ORDER BY pu.purchase_date, pu.purchase_id, i.purchase_item_id"
     );
     $st->execute([$from, $to]);
@@ -109,7 +109,7 @@ case 'stock':
     $st = $conn->query(
         "SELECT p.product_id, $pname AS nm, c.category_name,
                 (SELECT pi.unit_price FROM purchase_items pi JOIN purchases pu ON pu.purchase_id = pi.purchase_id
-                 WHERE pi.product_id = p.product_id ORDER BY pu.purchase_date DESC, pi.purchase_item_id DESC LIMIT 1) AS cost
+                 WHERE pi.product_id = p.product_id AND pu.status = 'completed' ORDER BY pu.purchase_date DESC, pi.purchase_item_id DESC LIMIT 1) AS cost
          FROM products p
          JOIN categories c ON c.category_id = p.category_id
          LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
@@ -207,7 +207,7 @@ case 'monthly':
     $q->execute([$start, $end]);
     foreach ($q->fetchAll() as $x) { $days[$x['d']] = ($days[$x['d']] ?? $blank); $days[$x['d']]['sales'] = (float)$x['t']; }
 
-    $q = $conn->prepare('SELECT DATE(purchase_date) d, SUM(total_amount) t FROM purchases WHERE DATE(purchase_date) BETWEEN ? AND ? GROUP BY d');
+    $q = $conn->prepare('SELECT DATE(purchase_date) d, SUM(total_amount) t FROM purchases WHERE status = \'completed\' AND DATE(purchase_date) BETWEEN ? AND ? GROUP BY d');
     $q->execute([$start, $end]);
     foreach ($q->fetchAll() as $x) { $days[$x['d']] = ($days[$x['d']] ?? $blank); $days[$x['d']]['purch'] = (float)$x['t']; }
 

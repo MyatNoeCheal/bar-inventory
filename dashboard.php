@@ -12,7 +12,7 @@ $st->execute([$today]);
 $salesToday = $st->fetch();
 
 // Today's purchases
-$st = $conn->prepare('SELECT COALESCE(SUM(total_amount),0) AS t, COUNT(*) AS c FROM purchases WHERE DATE(purchase_date) = ?');
+$st = $conn->prepare('SELECT COALESCE(SUM(total_amount),0) AS t, COUNT(*) AS c FROM purchases WHERE status = \'completed\' AND DATE(purchase_date) = ?');
 $st->execute([$today]);
 $purchToday = $st->fetch();
 

@@ -92,6 +92,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lock = $conn->prepare("SELECT product_id FROM products WHERE product_id IN ($in) FOR UPDATE");
             $lock->execute($ids);
 
+            // A day that has already been counted is closed for that product
+            foreach (get_closed_products($conn, $ids, $dt->format('Y-m-d')) as $pid => $d) {
+                $errors[] = product_label($validProducts[$pid]) . ': already counted on ' . date('d-M-Y', strtotime($d)) . ', so that date is closed. Use a later date.';
+            }
+
             foreach ($wanted as $pid => $qty) {
                 $have = get_stock($conn, $pid);
                 if ($qty > $have) {

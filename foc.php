@@ -40,8 +40,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $conn->prepare('SELECT product_id FROM products WHERE product_id = ? FOR UPDATE')->execute([$pid]);
             $have = get_stock($conn, $pid);
+            $closed = get_closed_products($conn, [$pid], $dt->format('Y-m-d'));
 
-            if ($qty > $have) {
+            if ($closed) {
+                $conn->rollBack();
+                $errors[] = pname($validProducts[$pid]) . ': already counted on ' . date('d-M-Y', strtotime($closed[$pid])) . ', so that date is closed. Use a later date.';
+            } elseif ($qty > $have) {
                 $conn->rollBack();
                 $errors[] = pname($validProducts[$pid]) . ": only $have in stock (you entered $qty).";
             } else {
