@@ -16,14 +16,26 @@ function run_seed(PDO $conn, int $userId): array
     foreach ($tables as $t) $conn->exec("ALTER TABLE $t AUTO_INCREMENT = 1");
 
     /* ---------- 2. Lookups ---------- */
+    // Find a category / size, or create it if your database doesn't have it yet
     $catId = function (string $n) use ($conn): int {
-        $id = (int)$conn->query('SELECT category_id FROM categories WHERE category_name = ' . $conn->quote($n))->fetchColumn();
-        if (!$id) throw new RuntimeException("Category '$n' not found. Add it on the Categories page first.");
+        $q = $conn->prepare('SELECT category_id FROM categories WHERE category_name = ?');
+        $q->execute([$n]);
+        $id = (int)$q->fetchColumn();
+        if (!$id) {
+            $conn->prepare('INSERT INTO categories (category_name) VALUES (?)')->execute([$n]);
+            $id = (int)$conn->lastInsertId();
+        }
         return $id;
     };
-    $sizeId = function (string $c) use ($conn): int {
-        $id = (int)$conn->query('SELECT size_type_id FROM size_types WHERE code = ' . $conn->quote($c))->fetchColumn();
-        if (!$id) throw new RuntimeException("Size '$c' not found. Add it on the Sizes page first.");
+    $sizeNames = ['1L' => '1 Liter', '70CL' => '70 cl', 'B' => 'Large Bottle', 'C-S' => 'Small Can'];
+    $sizeId = function (string $c) use ($conn, $sizeNames): int {
+        $q = $conn->prepare('SELECT size_type_id FROM size_types WHERE code = ?');
+        $q->execute([$c]);
+        $id = (int)$q->fetchColumn();
+        if (!$id) {
+            $conn->prepare('INSERT INTO size_types (code, name) VALUES (?, ?)')->execute([$c, $sizeNames[$c] ?? $c]);
+            $id = (int)$conn->lastInsertId();
+        }
         return $id;
     };
 
