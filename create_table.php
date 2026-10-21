@@ -257,6 +257,12 @@ try {
             foc_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             product_id INT UNSIGNED NOT NULL,
             quantity INT UNSIGNED NOT NULL,
+
+            -- received = FOC from a supplier (adds WH stock)
+            -- given    = FOC given to a customer (reduces Sale stock)
+            foc_type ENUM('received', 'given')
+                NOT NULL DEFAULT 'given',
+
             foc_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             description TEXT NULL,
             created_by INT UNSIGNED NOT NULL,
@@ -295,6 +301,10 @@ try {
                 'other'
             ) NOT NULL,
 
+            -- which stock the adjustment applies to
+            location ENUM('wh', 'sale')
+                NOT NULL DEFAULT 'sale',
+
             description TEXT NULL,
             adjustment_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             created_by INT UNSIGNED NOT NULL,
@@ -325,6 +335,10 @@ try {
             product_id INT UNSIGNED NOT NULL,
             inventory_date DATE NOT NULL,
 
+            -- each location (WH / Sale) is counted separately
+            location ENUM('wh', 'sale')
+                NOT NULL DEFAULT 'sale',
+
             opening_quantity INT NOT NULL DEFAULT 0,
             physical_closing INT NOT NULL DEFAULT 0,
             calculated_closing INT NOT NULL DEFAULT 0,
@@ -334,9 +348,10 @@ try {
             counted_by INT UNSIGNED NOT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-            UNIQUE KEY uq_daily_product (
+            UNIQUE KEY uq_daily_product_location (
                 product_id,
-                inventory_date
+                inventory_date,
+                location
             ),
 
             CONSTRAINT fk_daily_inventory_product
@@ -347,6 +362,35 @@ try {
 
             CONSTRAINT fk_daily_inventory_user
                 FOREIGN KEY (counted_by)
+                REFERENCES users(user_id)
+                ON UPDATE CASCADE
+                ON DELETE RESTRICT
+        ) ENGINE=InnoDB
+    ");
+
+
+    // =====================================================
+    // 15. STOCK TRANSFERS (WH -> SALE)
+    // =====================================================
+
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS stock_transfers (
+            transfer_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            product_id INT UNSIGNED NOT NULL,
+            quantity INT UNSIGNED NOT NULL,
+            transfer_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            description TEXT NULL,
+            created_by INT UNSIGNED NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            CONSTRAINT fk_transfers_product
+                FOREIGN KEY (product_id)
+                REFERENCES products(product_id)
+                ON UPDATE CASCADE
+                ON DELETE RESTRICT,
+
+            CONSTRAINT fk_transfers_user
+                FOREIGN KEY (created_by)
                 REFERENCES users(user_id)
                 ON UPDATE CASCADE
                 ON DELETE RESTRICT

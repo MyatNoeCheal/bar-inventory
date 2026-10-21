@@ -25,21 +25,25 @@ $st = $conn->prepare(
 $st->execute([$today]);
 $profitToday = $st->fetchColumn();
 
-// Stock
-$stock = get_stock_map($conn);
+// Stock (two locations)
+$whMap   = get_stock_map($conn, 'wh');
+$saleMap = get_stock_map($conn, 'sale');
 $products = $conn->query(
     'SELECT p.product_id, p.product_name, s.code AS size_code
      FROM products p LEFT JOIN size_types s ON s.size_type_id = p.size_type_id
      WHERE p.is_active = 1 ORDER BY p.product_name'
 )->fetchAll();
 
-$totalUnits = 0;
+$whUnits = 0; $saleUnits = 0;
 $low = [];
 foreach ($products as $p) {
-    $q = $stock[(int)$p['product_id']] ?? 0;
-    $totalUnits += max($q, 0);
-    if ($q <= $lowLimit) {
-        $low[] = ['name' => $p['product_name'] . ($p['size_code'] ? ' ' . $p['size_code'] : ''), 'qty' => $q];
+    $id = (int)$p['product_id'];
+    $w = $whMap[$id] ?? 0;
+    $q = $saleMap[$id] ?? 0;
+    $whUnits   += max($w, 0);
+    $saleUnits += max($q, 0);
+    if ($q <= $lowLimit) {   // low = Sale stock is running out
+        $low[] = ['name' => $p['product_name'] . ($p['size_code'] ? ' ' . $p['size_code'] : ''), 'qty' => $q, 'wh' => $w];
     }
 }
 usort($low, fn($a, $b) => $a['qty'] <=> $b['qty']);
@@ -77,29 +81,36 @@ $recent = $conn->query(
     <?php endif; ?>
 
     <div class="stat-card">
-        <div class="label">Units in stock</div>
-        <div class="value"><?= number_format($totalUnits) ?></div>
+        <div class="label">Sale stock (units)</div>
+        <div class="value"><?= number_format($saleUnits) ?></div>
+        <div class="sub">Available to sell</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="label">WH stock (units)</div>
+        <div class="value"><?= number_format($whUnits) ?></div>
         <div class="sub"><?= count($products) ?> active products</div>
     </div>
 </div>
 
 <div class="dash-grid">
     <div class="card flush">
-        <h3>Low stock <span class="muted" style="font-weight:400">(<?= (int)$lowLimit ?> or fewer)</span></h3>
+        <h3>Low Sale stock <span class="muted" style="font-weight:400">(<?= (int)$lowLimit ?> or fewer)</span></h3>
         <?php if ($low): ?>
             <table>
-                <thead><tr><th>Product</th><th>In stock</th></tr></thead>
+                <thead><tr><th>Product</th><th>Sale</th><th>WH</th></tr></thead>
                 <tbody>
                 <?php foreach ($low as $l): ?>
                     <tr>
                         <td><?= e($l['name']) ?></td>
                         <td><span class="badge <?= $l['qty'] <= 0 ? 'badge-off' : '' ?>"><?= (int)$l['qty'] ?></span></td>
+                        <td><?= (int)$l['wh'] ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
         <?php else: ?>
-            <div class="empty">Everything is well stocked.</div>
+            <div class="empty">Sale stock is well stocked.</div>
         <?php endif; ?>
     </div>
 

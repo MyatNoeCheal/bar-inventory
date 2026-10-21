@@ -1,5 +1,5 @@
 <?php
-$pageTitle = 'Purchases (Stock In)';
+$pageTitle = 'Purchases (WH Stock In)';
 require_once __DIR__ . '/includes/header.php';
 
 $from     = $_GET['from'] ?? date('Y-m-01');
