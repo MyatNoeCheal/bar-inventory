@@ -71,7 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($products as $p) {
             $names[(int)$p['product_id']] = $p['product_name'] . ($p['size_code'] ? ' ' . $p['size_code'] : '');
         }
-        foreach (get_closed_products($conn, array_column($items, 'product_id'), $dt->format('Y-m-d')) as $pid => $d) {
+        foreach (get_closed_products($conn, array_column($items, 'product_id'), $dt->format('Y-m-d'), ['wh']) as $pid => $d) {
             $errors[] = $names[$pid] . ': already counted on ' . date('d-M-Y', strtotime($d)) . ', so that date is closed. Use a later date.';
         }
     }
@@ -116,7 +116,7 @@ function product_options(array $products, $selected = ''): string
     return $html;
 }
 
-$pageTitle = 'New Purchase';
+$pageTitle = 'New Purchase (into WH)';
 require_once __DIR__ . '/includes/header.php';
 ?>
 

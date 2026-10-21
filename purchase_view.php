@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn->prepare("SELECT product_id FROM products WHERE product_id IN ($in) FOR UPDATE")->execute($ids);
         }
 
-        $closed = get_closed_products($conn, $ids, date('Y-m-d', strtotime($pu['purchase_date'])));
+        $closed = get_closed_products($conn, $ids, date('Y-m-d', strtotime($pu['purchase_date'])), ['wh']);
         $errors = [];
         foreach ($lines as $l) {
             $pid   = (int)$l['product_id'];
@@ -48,9 +48,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = $label . ': already counted on ' . date('d-M-Y', strtotime($closed[$pid])) . ', so this purchase can no longer be voided.';
                 continue;
             }
-            $have = get_stock($conn, $pid);
+            $have = get_stock($conn, $pid, 'wh');
             if ($have < (int)$l['qty']) {
-                $errors[] = $label . ': only ' . $have . ' in stock but this purchase added ' . (int)$l['qty'] . ', so voiding would make stock negative.';
+                $errors[] = $label . ': only ' . $have . ' in WH stock but this purchase added ' . (int)$l['qty'] . ', so voiding would make WH stock negative.';
             }
         }
 
@@ -60,7 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $conn->prepare("UPDATE purchases SET status = 'voided' WHERE purchase_id = ?")->execute([$id]);
             $conn->commit();
-            flash('success', 'Purchase voided. Its items were removed from stock.');
+            flash('success', 'Purchase voided. Its items were removed from WH stock.');
         }
     } catch (Throwable $ex) {
         if ($conn->inTransaction()) $conn->rollBack();
@@ -132,7 +132,7 @@ require_once __DIR__ . '/includes/header.php';
 <div class="actions" style="margin-top:16px">
     <a class="btn btn-secondary" href="purchases.php">← Back to purchases</a>
     <?php if (is_admin() && $purchase['status'] === 'completed'): ?>
-        <form method="post" onsubmit="return confirm('Void this purchase? Its items will be removed from stock.');">
+        <form method="post" onsubmit="return confirm('Void this purchase? Its items will be removed from WH stock.');">
             <?= csrf_field() ?>
             <button class="btn" style="background:#b91c1c" type="submit">Void Purchase</button>
         </form>

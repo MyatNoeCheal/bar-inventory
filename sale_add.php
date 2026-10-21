@@ -4,7 +4,7 @@ require_once __DIR__ . '/includes/stock.php';
 
 $paymentMethods = ['Cash', 'Card', 'Mobile Pay', 'Other'];
 
-$stock = get_stock_map($conn);
+$stock = get_stock_map($conn, 'sale');
 
 $products = $conn->query(
     'SELECT p.product_id, p.product_name, s.code AS size_code, c.category_name
@@ -35,7 +35,7 @@ function sale_options(array $products, array $stock, array $lastPrice, $selected
         $qty = $stock[$id] ?? 0;
         $sel = ((string)$selected === (string)$id) ? ' selected' : '';
         $html .= '<option value="' . $id . '" data-stock="' . $qty . '" data-price="' . e($lastPrice[$id] ?? '') . '"' . $sel . '>'
-               . e(product_label($p)) . ' — stock: ' . $qty . '</option>';
+               . e(product_label($p)) . ' — Sale stock: ' . $qty . '</option>';
     }
     return $html;
 }
@@ -93,14 +93,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lock->execute($ids);
 
             // A day that has already been counted is closed for that product
-            foreach (get_closed_products($conn, $ids, $dt->format('Y-m-d')) as $pid => $d) {
+            foreach (get_closed_products($conn, $ids, $dt->format('Y-m-d'), ['sale']) as $pid => $d) {
                 $errors[] = product_label($validProducts[$pid]) . ': already counted on ' . date('d-M-Y', strtotime($d)) . ', so that date is closed. Use a later date.';
             }
 
             foreach ($wanted as $pid => $qty) {
-                $have = get_stock($conn, $pid);
+                $have = get_stock($conn, $pid, 'sale');
                 if ($qty > $have) {
-                    $errors[] = product_label($validProducts[$pid]) . ": only $have in stock (you entered $qty).";
+                    $errors[] = product_label($validProducts[$pid]) . ": only $have in Sale stock (you entered $qty). Move more from WH on the Transfer page.";
                 }
             }
 
@@ -128,7 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Stock may have changed; refresh labels
-    $stock = get_stock_map($conn);
+    $stock = get_stock_map($conn, 'sale');
 }
 
 $pageTitle = 'New Sale';

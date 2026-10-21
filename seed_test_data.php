@@ -9,21 +9,33 @@ function run_seed(PDO $conn, int $userId): array
     mt_srand(2026); // same data every time
 
     /* ---------- 1. Clear old transaction + master data ---------- */
-    $tables = ['sale_items', 'sales', 'purchase_items', 'purchases', 'foc_records', 'stock_adjustments', 'daily_inventory', 'products', 'suppliers'];
+    $tables = ['sale_items', 'sales', 'purchase_items', 'purchases', 'foc_records', 'stock_adjustments', 'stock_transfers', 'daily_inventory', 'products', 'suppliers'];
     $conn->beginTransaction();
     foreach ($tables as $t) $conn->exec("DELETE FROM $t");
     $conn->commit();
     foreach ($tables as $t) $conn->exec("ALTER TABLE $t AUTO_INCREMENT = 1");
 
     /* ---------- 2. Lookups ---------- */
+    // Find a category / size, or create it if your database doesn't have it yet
     $catId = function (string $n) use ($conn): int {
-        $id = (int)$conn->query('SELECT category_id FROM categories WHERE category_name = ' . $conn->quote($n))->fetchColumn();
-        if (!$id) throw new RuntimeException("Category '$n' not found. Run seed.php first.");
+        $q = $conn->prepare('SELECT category_id FROM categories WHERE category_name = ?');
+        $q->execute([$n]);
+        $id = (int)$q->fetchColumn();
+        if (!$id) {
+            $conn->prepare('INSERT INTO categories (category_name) VALUES (?)')->execute([$n]);
+            $id = (int)$conn->lastInsertId();
+        }
         return $id;
     };
-    $sizeId = function (string $c) use ($conn): int {
-        $id = (int)$conn->query('SELECT size_type_id FROM size_types WHERE code = ' . $conn->quote($c))->fetchColumn();
-        if (!$id) throw new RuntimeException("Size '$c' not found. Run seed.php first.");
+    $sizeNames = ['1L' => '1 Liter', '70CL' => '70 cl', 'B' => 'Large Bottle', 'C-S' => 'Small Can'];
+    $sizeId = function (string $c) use ($conn, $sizeNames): int {
+        $q = $conn->prepare('SELECT size_type_id FROM size_types WHERE code = ?');
+        $q->execute([$c]);
+        $id = (int)$q->fetchColumn();
+        if (!$id) {
+            $conn->prepare('INSERT INTO size_types (code, name) VALUES (?, ?)')->execute([$c, $sizeNames[$c] ?? $c]);
+            $id = (int)$conn->lastInsertId();
+        }
         return $id;
     };
 
@@ -41,30 +53,30 @@ function run_seed(PDO $conn, int $userId): array
             $sup[$n] = (int)$conn->lastInsertId();
         }
 
-        /* ---------- 4. Products: name => [category, size, selling price, kind, description] ---------- */
+        /* ---------- 4. Products: name => [category, size, selling price, kind, description, Sale-section par level] ---------- */
         $defs = [
-            'Chivas 18'            => ['Whisky',     '1L',   70000,  'spirit', '18 Years'],
-            'Johnnie Walker Black' => ['Whisky',     '70CL', 60000,  'spirit', 'Black Label'],
-            'Smirnoff'             => ['Vodka',      '70CL', 40000,  'spirit', null],
-            'Hennessy VS'          => ['Brandy',     '1L',   130000, 'spirit', null],
-            'Bacardi'              => ['Rum',        '70CL', 38000,  'spirit', 'White rum'],
-            'House Red Wine'       => ['Wine',       '70CL', 45000,  'spirit', null],
-            'Myanmar Beer'         => ['Beer',       'B',    3000,   'fast',   'Large bottle'],
-            'Tiger Beer'           => ['Beer',       'C-S',  2500,   'fast',   'Small can'],
-            'Heineken'             => ['Beer',       'C-S',  2800,   'fast',   'Small can'],
-            'Coca-Cola'            => ['Soft Drink', 'C-S',  1200,   'fast',   null],
+            'Chivas 18'            => ['Whisky',     '1L',   70000,  'spirit', '18 Years',          3],
+            'Johnnie Walker Black' => ['Whisky',     '70CL', 60000,  'spirit', 'Black Label',       3],
+            'Smirnoff'             => ['Vodka',      '70CL', 40000,  'spirit', null,                3],
+            'Hennessy VS'          => ['Brandy',     '1L',   130000, 'spirit', null,                2],
+            'Bacardi'              => ['Rum',        '70CL', 38000,  'spirit', 'White rum',         3],
+            'House Red Wine'       => ['Wine',       '70CL', 45000,  'spirit', null,                3],
+            'Myanmar Beer'         => ['Beer',       'B',    3000,   'fast',   'Large bottle',      24],
+            'Tiger Beer'           => ['Beer',       'C-S',  2500,   'fast',   'Small can',         24],
+            'Heineken'             => ['Beer',       'C-S',  2800,   'fast',   'Small can',         24],
+            'Coca-Cola'            => ['Soft Drink', 'C-S',  1200,   'fast',   null,                24],
         ];
         $prod = [];
         $ins = $conn->prepare('INSERT INTO products (product_name, category_id, size_type_id, description) VALUES (?, ?, ?, ?)');
-        foreach ($defs as $name => [$cat, $size, $price, $kind, $desc]) {
+        foreach ($defs as $name => [$cat, $size, $price, $kind, $desc, $par]) {
             $ins->execute([$name, $catId($cat), $sizeId($size), $desc]);
-            $prod[$name] = ['id' => (int)$conn->lastInsertId(), 'price' => $price, 'kind' => $kind];
+            $prod[$name] = ['id' => (int)$conn->lastInsertId(), 'price' => $price, 'kind' => $kind, 'par' => $par];
         }
         // price changes: product => [applies when "days ago" <= N, new price]
         $priceChange = ['Myanmar Beer' => [3, 3200]];
 
         /* ---------- 5. Plans ---------- */
-        // days-ago => list of [supplier, time, [[product, qty, unit cost], ...]]
+        // PURCHASES go into WH. days-ago => list of [supplier, time, [[product, qty, unit cost], ...]]
         $planBuy = [
             7 => [
                 ['Golden Beverage Co.',   '10:30', [['Myanmar Beer', 60, 1800], ['Tiger Beer', 48, 1500], ['Heineken', 48, 1700], ['Coca-Cola', 48, 700]]],
@@ -84,41 +96,49 @@ function run_seed(PDO $conn, int $userId): array
                 ['Daily Mart Wholesale', '10:30', [['Bacardi', 3, 27000], ['Coca-Cola', 24, 750]]],
             ],
         ];
-        // days-ago => list of [product, qty, note, time]
-        $planFoc = [
+        // FOC received from suppliers (WH +): days-ago => [product, qty, note, time]
+        $planFocIn = [
+            7 => [['Myanmar Beer', 6, 'Free cases with order', '10:40']],
+            4 => [['Tiger Beer', 4, 'Supplier promotion', '10:30']],
+        ];
+        // FOC given to customers (Sale -): days-ago => [product, qty, note, time]
+        $planFocOut = [
             6 => [['Myanmar Beer', 2, 'Promotion', '20:10']],
             3 => [['Tiger Beer', 2, 'Regular customer', '21:00']],
             1 => [['Johnnie Walker Black', 1, "Owner's guest", '22:15']],
             0 => [['Coca-Cola', 3, 'Staff drinks', '14:00']],
         ];
-        // days-ago => list of [product, type, signed qty, note]
+        // Adjustments: days-ago => [product, type, location, signed qty, note]
         $planAdj = [
-            5 => [['House Red Wine', 'damaged', -1, 'Bottle broken']],
-            3 => [['Heineken', 'lost', -2, 'Lost in storage']],
-            2 => [['Coca-Cola', 'found', 1, 'Found behind fridge']],
-            1 => [['Myanmar Beer', 'correction', -1, 'Count correction']],
-            0 => [['Tiger Beer', 'damaged', -1, 'Dropped and broken']],
+            6 => [['Bacardi', 'damaged', 'wh', -1, 'Broken while unloading']],
+            5 => [['House Red Wine', 'damaged', 'sale', -1, 'Bottle broken']],
+            3 => [['Heineken', 'lost', 'wh', -2, 'Lost in storage']],
+            2 => [['Coca-Cola', 'found', 'sale', 1, 'Found behind fridge']],
+            1 => [['Myanmar Beer', 'correction', 'sale', -1, 'Count correction']],
+            0 => [['Tiger Beer', 'damaged', 'sale', -1, 'Dropped and broken']],
         ];
-        // days-ago => product => units the physical count differs from expected
+        // End-of-day count differences: days-ago => location => product => units physical differs from expected
         $deviation = [
-            6 => ['Smirnoff' => -1],
-            5 => ['Myanmar Beer' => -2],
-            3 => ['Tiger Beer' => +1],
-            2 => ['Coca-Cola' => -1],
-            1 => ['Chivas 18' => -1],
+            6 => ['sale' => ['Smirnoff' => -1]],
+            5 => ['sale' => ['Myanmar Beer' => -2]],
+            4 => ['wh'   => ['Myanmar Beer' => -2]],
+            3 => ['sale' => ['Tiger Beer' => +1], 'wh' => ['Heineken' => -1]],
+            2 => ['sale' => ['Coca-Cola' => -1]],
+            1 => ['sale' => ['Chivas 18' => -1]],
         ];
 
         /* ---------- 6. Helpers ---------- */
-        $avail = [];
-        $stats = ['purchases' => 0, 'sales' => 0, 'voided' => 0, 'foc' => 0, 'adjustments' => 0, 'counts' => 0];
+        $stock = ['wh' => [], 'sale' => []];
+        $stats = ['purchases' => 0, 'sales' => 0, 'voided' => 0, 'foc_in' => 0, 'foc_out' => 0, 'transfers' => 0, 'adjustments' => 0, 'counts' => 0];
 
         $insPur  = $conn->prepare('INSERT INTO purchases (supplier_id, purchase_date, total_amount, description, created_by) VALUES (?, ?, ?, ?, ?)');
         $insPI   = $conn->prepare('INSERT INTO purchase_items (purchase_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)');
         $insSale = $conn->prepare('INSERT INTO sales (sale_date, total_amount, payment_method, status, created_by) VALUES (?, ?, ?, ?, ?)');
         $insSI   = $conn->prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, unit_cost) VALUES (?, ?, ?, ?, ?)');
-        $insFoc  = $conn->prepare('INSERT INTO foc_records (product_id, quantity, foc_date, description, created_by) VALUES (?, ?, ?, ?, ?)');
-        $insAdj  = $conn->prepare('INSERT INTO stock_adjustments (product_id, quantity, adjustment_type, description, adjustment_date, created_by) VALUES (?, ?, ?, ?, ?, ?)');
-        $insCnt  = $conn->prepare('INSERT INTO daily_inventory (product_id, inventory_date, opening_quantity, physical_closing, calculated_closing, difference, description, counted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        $insFoc  = $conn->prepare('INSERT INTO foc_records (product_id, quantity, foc_type, foc_date, description, created_by) VALUES (?, ?, ?, ?, ?, ?)');
+        $insAdj  = $conn->prepare('INSERT INTO stock_adjustments (product_id, quantity, adjustment_type, location, description, adjustment_date, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $insTr   = $conn->prepare('INSERT INTO stock_transfers (product_id, quantity, transfer_date, description, created_by) VALUES (?, ?, ?, ?, ?)');
+        $insCnt  = $conn->prepare('INSERT INTO daily_inventory (product_id, inventory_date, location, opening_quantity, physical_closing, calculated_closing, difference, description, counted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $costQ   = $conn->prepare('SELECT pi.unit_price FROM purchase_items pi JOIN purchases pu ON pu.purchase_id = pi.purchase_id
                                    WHERE pi.product_id = ? AND pu.purchase_date <= ? ORDER BY pu.purchase_date DESC, pi.purchase_item_id DESC LIMIT 1');
 
@@ -126,9 +146,13 @@ function run_seed(PDO $conn, int $userId): array
             $costQ->execute([$pid, $dt]);
             return (float)($costQ->fetchColumn() ?: 0);
         };
-        $rt = fn(int $h1, int $m1, int $h2, int $m2) => sprintf('%02d:%02d:00', ...(function ($t) { return [intdiv($t, 60), $t % 60]; })(mt_rand($h1 * 60 + $m1, $h2 * 60 + $m2)));
+        // random time between two clock times
+        $rt = function (int $h1, int $m1, int $h2, int $m2): string {
+            $t = mt_rand($h1 * 60 + $m1, $h2 * 60 + $m2);
+            return sprintf('%02d:%02d:00', intdiv($t, 60), $t % 60);
+        };
 
-        $buy = function (string $supplier, string $dt, array $lines) use ($conn, $sup, $prod, $userId, $insPur, $insPI, &$avail, &$stats) {
+        $buy = function (string $supplier, string $dt, array $lines) use ($conn, $sup, $prod, $userId, $insPur, $insPI, &$stock, &$stats) {
             $total = 0;
             foreach ($lines as [, $q, $p]) $total += $q * $p;
             $insPur->execute([$sup[$supplier], $dt, $total, null, $userId]);
@@ -136,19 +160,19 @@ function run_seed(PDO $conn, int $userId): array
             foreach ($lines as [$name, $q, $p]) {
                 $pid = $prod[$name]['id'];
                 $insPI->execute([$id, $pid, $q, $p]);
-                $avail[$pid] = ($avail[$pid] ?? 0) + $q;
+                $stock['wh'][$pid] = ($stock['wh'][$pid] ?? 0) + $q;
             }
             $stats['purchases']++;
         };
 
-        $sell = function (string $dt, array $lines, string $pay, string $status = 'completed') use ($conn, $userId, $insSale, $insSI, $costAt, &$avail, &$stats) {
+        $sell = function (string $dt, array $lines, string $pay, string $status = 'completed') use ($conn, $userId, $insSale, $insSI, $costAt, &$stock, &$stats) {
             $total = 0;
             foreach ($lines as [, $q, $p]) $total += $q * $p;
             $insSale->execute([$dt, $total, $pay, $status, $userId]);
             $id = (int)$conn->lastInsertId();
             foreach ($lines as [$pid, $q, $p]) {
                 $insSI->execute([$id, $pid, $q, $p, $costAt($pid, $dt)]);
-                if ($status === 'completed') $avail[$pid] -= $q;
+                if ($status === 'completed') $stock['sale'][$pid] -= $q;
             }
             $stats[$status === 'completed' ? 'sales' : 'voided']++;
         };
@@ -163,66 +187,103 @@ function run_seed(PDO $conn, int $userId): array
         /* ---------- 7. Day by day (oldest first) ---------- */
         for ($off = 7; $off >= 0; $off--) {
             $date  = date('Y-m-d', strtotime("-$off days"));
-            $avail = get_stock_map($conn);   // starts from yesterday's physical count
+            $stock = ['wh' => get_stock_map($conn, 'wh'), 'sale' => get_stock_map($conn, 'sale')];   // start from the last counts
 
-            // purchases
+            // purchases (into WH)
             foreach ($planBuy[$off] ?? [] as [$supplier, $time, $lines]) {
                 $buy($supplier, "$date $time:00", $lines);
             }
 
-            // sales
+            // FOC received from suppliers (into WH)
+            foreach ($planFocIn[$off] ?? [] as [$name, $qty, $note, $time]) {
+                $pid = $prod[$name]['id'];
+                $insFoc->execute([$pid, $qty, 'received', "$date $time:00", $note, $userId]);
+                $stock['wh'][$pid] = ($stock['wh'][$pid] ?? 0) + $qty;
+                $stats['foc_in']++;
+            }
+
+            // WH adjustments (damaged in the warehouse etc.)
+            foreach ($planAdj[$off] ?? [] as [$name, $type, $loc, $qty, $note]) {
+                if ($loc !== 'wh') continue;
+                $pid = $prod[$name]['id'];
+                if ($qty < 0 && ($stock['wh'][$pid] ?? 0) < abs($qty)) continue;
+                $insAdj->execute([$pid, $qty, $type, 'wh', $note, "$date 12:00:00", $userId]);
+                $stock['wh'][$pid] += $qty;
+                $stats['adjustments']++;
+            }
+
+            // morning top-up: WH -> Sale up to each product's par level
+            foreach ($prod as $name => $p) {
+                $pid  = $p['id'];
+                $need = $p['par'] - ($stock['sale'][$pid] ?? 0);
+                $q    = min($need, $stock['wh'][$pid] ?? 0);
+                if ($q > 0) {
+                    $insTr->execute([$pid, $q, "$date 13:00:00", 'Daily top-up for Sale section', $userId]);
+                    $stock['wh'][$pid]   -= $q;
+                    $stock['sale'][$pid] = ($stock['sale'][$pid] ?? 0) + $q;
+                    $stats['transfers']++;
+                }
+            }
+
+            // sales (from Sale stock only)
             $count = 6 + mt_rand(0, 4) + (in_array((int)date('N', strtotime($date)), [5, 6], true) ? 3 : 0);
             for ($s = 0; $s < $count; $s++) {
                 $lines = []; $used = [];
                 for ($j = mt_rand(1, 3); $j > 0; $j--) {
                     $name = $bag[mt_rand(0, count($bag) - 1)];
                     $pid  = $prod[$name]['id'];
-                    if (isset($used[$pid]) || ($avail[$pid] ?? 0) <= 0) continue;
+                    if (isset($used[$pid]) || ($stock['sale'][$pid] ?? 0) <= 0) continue;
                     $max   = $prod[$name]['kind'] === 'spirit' ? 2 : 6;
-                    $qty   = mt_rand(1, min($max, $avail[$pid]));
+                    $qty   = mt_rand(1, min($max, $stock['sale'][$pid]));
                     $price = $prod[$name]['price'];
                     if (isset($priceChange[$name]) && $off <= $priceChange[$name][0]) $price = $priceChange[$name][1];
                     $lines[] = [$pid, $qty, $price];
                     $used[$pid] = true;
                 }
                 if (!$lines) continue;
-                $time = $off === 0 ? $rt(12, 30, 15, 30) : $rt(18, 0, 23, 30);
+                $time = $off === 0 ? $rt(14, 0, 16, 30) : $rt(18, 0, 23, 30);
                 $sell("$date $time", $lines, $payments[mt_rand(0, 4)]);
             }
 
             // one voided sale (should be ignored everywhere)
             if ($off === 5) {
-                $sell("$date 21:40:00", [[$prod['Chivas 18']['id'], 1, 70000]], 'Cash', 'voided');
+                $pid = $prod['Chivas 18']['id'];
+                $stockBefore = $stock['sale'][$pid] ?? 0;
+                $sell("$date 21:40:00", [[$pid, 1, 70000]], 'Cash', 'voided');
+                $stock['sale'][$pid] = $stockBefore;   // a voided sale does not change stock
             }
 
-            // FOC
-            foreach ($planFoc[$off] ?? [] as [$name, $qty, $note, $time]) {
+            // FOC given to customers (Sale stock)
+            foreach ($planFocOut[$off] ?? [] as [$name, $qty, $note, $time]) {
                 $pid = $prod[$name]['id'];
-                if (($avail[$pid] ?? 0) < $qty) continue;
-                $insFoc->execute([$pid, $qty, "$date $time:00", $note, $userId]);
-                $avail[$pid] -= $qty;
-                $stats['foc']++;
+                if (($stock['sale'][$pid] ?? 0) < $qty) continue;
+                $insFoc->execute([$pid, $qty, 'given', "$date $time:00", $note, $userId]);
+                $stock['sale'][$pid] -= $qty;
+                $stats['foc_out']++;
             }
 
-            // adjustments
-            foreach ($planAdj[$off] ?? [] as [$name, $type, $qty, $note]) {
+            // Sale-section adjustments
+            foreach ($planAdj[$off] ?? [] as [$name, $type, $loc, $qty, $note]) {
+                if ($loc !== 'sale') continue;
                 $pid = $prod[$name]['id'];
-                if ($qty < 0 && ($avail[$pid] ?? 0) < abs($qty)) continue;
-                $insAdj->execute([$pid, $qty, $type, $note, "$date 22:30:00", $userId]);
-                $avail[$pid] += $qty;
+                if ($qty < 0 && ($stock['sale'][$pid] ?? 0) < abs($qty)) continue;
+                $insAdj->execute([$pid, $qty, $type, 'sale', $note, "$date 22:30:00", $userId]);
+                $stock['sale'][$pid] += $qty;
                 $stats['adjustments']++;
             }
 
-            // end-of-day physical count (all days except today)
+            // end-of-day physical counts, both locations (all days except today)
             if ($off > 0) {
-                $fig = get_daily_figures($conn, $date);
-                foreach ($prod as $name => $p) {
-                    $f    = $fig[$p['id']];
-                    $dev  = $deviation[$off][$name] ?? 0;
-                    $phys = max($f['expected'] + $dev, 0);
-                    $diff = $phys - $f['expected'];
-                    $insCnt->execute([$p['id'], $date, $f['opening'], $phys, $f['expected'], $diff, $diff !== 0 ? 'Recount confirmed' : null, $userId]);
-                    $stats['counts']++;
+                foreach (['wh', 'sale'] as $loc) {
+                    $fig = get_daily_figures($conn, $date, $loc);
+                    foreach ($prod as $name => $p) {
+                        $f    = $fig[$p['id']];
+                        $dev  = $deviation[$off][$loc][$name] ?? 0;
+                        $phys = max($f['expected'] + $dev, 0);
+                        $diff = $phys - $f['expected'];
+                        $insCnt->execute([$p['id'], $date, $loc, $f['opening'], $phys, $f['expected'], $diff, $diff !== 0 ? 'Recount confirmed' : null, $userId]);
+                        $stats['counts']++;
+                    }
                 }
             }
         }
@@ -265,8 +326,9 @@ require_once __DIR__ . '/includes/header.php';
         <ul>
             <li><?= (int)$done['purchases'] ?> purchases</li>
             <li><?= (int)$done['sales'] ?> completed sales + <?= (int)$done['voided'] ?> voided sale</li>
-            <li><?= (int)$done['foc'] ?> FOC records, <?= (int)$done['adjustments'] ?> adjustments</li>
-            <li><?= (int)$done['counts'] ?> daily count rows (7 days &times; 10 products)</li>
+            <li><?= (int)$done['transfers'] ?> WH &rarr; Sale transfers</li>
+            <li><?= (int)$done['foc_in'] ?> FOC received (WH), <?= (int)$done['foc_out'] ?> FOC given (Sale), <?= (int)$done['adjustments'] ?> adjustments</li>
+            <li><?= (int)$done['counts'] ?> daily count rows (7 days &times; 10 products &times; WH and Sale)</li>
         </ul>
         <div class="actions">
             <a class="btn" href="dashboard.php">Dashboard</a>
@@ -277,7 +339,7 @@ require_once __DIR__ . '/includes/header.php';
 <?php else: ?>
     <div class="card">
         <h3>Replace all data with test data</h3>
-        <p>This <strong>deletes all products, suppliers, purchases, sales, FOC records, adjustments and daily counts</strong>, then loads an 8-day test scenario. Users, categories and sizes are kept.</p>
+        <p>This <strong>deletes all products, suppliers, purchases, sales, FOC records, adjustments and daily counts</strong>, then loads an 8-day WH / Sale test scenario. Users, categories and sizes are kept.</p>
         <form method="post" class="form-grid">
             <?= csrf_field() ?>
             <div>

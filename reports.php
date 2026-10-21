@@ -6,6 +6,7 @@ $reports = [
     'daily'     => 'Daily Inventory',
     'purchases' => 'Purchases',
     'sales'     => 'Sales',
+    'transfers' => 'Transfers WH → Sale',
     'stock'     => 'Remaining Stock',
     'foc'       => 'FOC',
     'adjust'    => 'Damaged / Lost',
@@ -30,6 +31,9 @@ if ($from > $to) { [$from, $to] = [$to, $from]; }
 $date  = ymd($_GET['date'] ?? null, $today);
 $month = preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $_GET['month'] ?? '') ? $_GET['month'] : date('Y-m');
 
+$loc = $_GET['loc'] ?? 'sale';
+if (!isset(STOCK_LOCATIONS[$loc])) $loc = 'sale';
+
 // Which filter does each report use?
 $filterType = ['daily' => 'date', 'stock' => 'none', 'monthly' => 'month'][$r] ?? 'range';
 
@@ -44,32 +48,42 @@ $pname = "CONCAT(p.product_name, IFNULL(CONCAT(' ', sz.code), ''))";
 switch ($r) {
 
 case 'daily':
-    $period = date('l, d F Y', strtotime($date));
-    $fig = get_daily_figures($conn, $date);
+    $period = location_label($loc) . ' stock, ' . date('l, d F Y', strtotime($date));
+    $fig = get_daily_figures($conn, $date, $loc);
     $st = $conn->prepare(
         "SELECT p.product_id, $pname AS nm, di.physical_closing, di.difference
          FROM products p
          LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
-         LEFT JOIN daily_inventory di ON di.product_id = p.product_id AND di.inventory_date = ?
+         LEFT JOIN daily_inventory di ON di.product_id = p.product_id AND di.inventory_date = ? AND di.location = ?
          WHERE p.is_active = 1 OR di.daily_inventory_id IS NOT NULL
          ORDER BY p.product_name, sz.code"
     );
-    $st->execute([$date]);
-    $cols = [['Product','t'],['Opening','i'],['+ Purchases','i'],['- Sales','i'],['- FOC','i'],['+/- Adjust','si'],['Expected','i'],['Physical','i'],['Difference','si']];
-    $t = array_fill(0, 8, 0);
+    $st->execute([$date, $loc]);
+    // [figure key, heading, type]
+    $moves = $loc === 'wh'
+        ? [['purchases', '+ Purchases', 'i'], ['foc_in', '+ FOC received', 'i'], ['transfer_out', '- To Sale', 'i'], ['adjustments', '+/- Adjust', 'si']]
+        : [['transfer_in', '+ From WH', 'i'], ['sales', '- Sales', 'i'], ['foc_out', '- FOC given', 'i'], ['adjustments', '+/- Adjust', 'si']];
+    $cols = [['Product','t'], ['Opening','i']];
+    foreach ($moves as [, $h, $ty]) $cols[] = [$h, $ty];
+    array_push($cols, ['Expected','i'], ['Physical','i'], ['Difference','si']);
+
+    $sumMoves = array_fill(0, count($moves), 0);
+    $tOpen = $tExp = $tPhys = $tDiff = 0;
     foreach ($st->fetchAll() as $p) {
         $f    = $fig[(int)$p['product_id']];
         $phys = $p['physical_closing'] === null ? null : (int)$p['physical_closing'];
         $diff = $p['difference'] === null ? null : (int)$p['difference'];
-        $rows[] = [$p['nm'], $f['opening'], $f['purchases'], $f['sales'], $f['foc'], $f['adjustments'], $f['expected'], $phys, $diff];
-        $t[0] += $f['opening']; $t[1] += $f['purchases']; $t[2] += $f['sales']; $t[3] += $f['foc'];
-        $t[4] += $f['adjustments']; $t[5] += $f['expected']; $t[6] += (int)$phys; $t[7] += (int)$diff;
+        $row  = [$p['nm'], $f['opening']];
+        foreach ($moves as $i => [$key]) { $row[] = $f[$key]; $sumMoves[$i] += $f[$key]; }
+        array_push($row, $f['expected'], $phys, $diff);
+        $rows[] = $row;
+        $tOpen += $f['opening']; $tExp += $f['expected']; $tPhys += (int)$phys; $tDiff += (int)$diff;
     }
-    $totals = ['Total', $t[0], $t[1], $t[2], $t[3], $t[4], $t[5], $t[6], $t[7]];
+    $totals = array_merge(['Total', $tOpen], $sumMoves, [$tExp, $tPhys, $tDiff]);
     break;
 
 case 'purchases':
-    $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to)) . ' (completed purchases only)';
+    $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to)) . ' (completed purchases only, into WH)';
     $st = $conn->prepare(
         "SELECT pu.purchase_date, pu.purchase_id, COALESCE(s.supplier_name, '-'), $pname, i.quantity, i.unit_price, i.subtotal
          FROM purchase_items i
@@ -103,9 +117,27 @@ case 'sales':
     $totals = ['Total', null, null, array_sum(array_column($rows, 3)), null, array_sum(array_column($rows, 5)), null];
     break;
 
+case 'transfers':
+    $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to));
+    $st = $conn->prepare(
+        "SELECT t.transfer_date, $pname, t.quantity, COALESCE(t.description, ''), u.full_name
+         FROM stock_transfers t
+         JOIN products p ON p.product_id = t.product_id
+         LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
+         JOIN users u ON u.user_id = t.created_by
+         WHERE DATE(t.transfer_date) BETWEEN ? AND ?
+         ORDER BY t.transfer_date, t.transfer_id"
+    );
+    $st->execute([$from, $to]);
+    $cols = [['Date','d'],['Product','t'],['Qty','i'],['Note','t'],['By','t']];
+    $rows = $st->fetchAll(PDO::FETCH_NUM);
+    $totals = ['Total', null, array_sum(array_column($rows, 2)), null, null];
+    break;
+
 case 'stock':
     $period = 'As of now';
-    $map = get_stock_map($conn);
+    $whMap   = get_stock_map($conn, 'wh');
+    $saleMap = get_stock_map($conn, 'sale');
     $st = $conn->query(
         "SELECT p.product_id, $pname AS nm, c.category_name,
                 (SELECT pi.unit_price FROM purchase_items pi JOIN purchases pu ON pu.purchase_id = pi.purchase_id
@@ -116,28 +148,30 @@ case 'stock':
          WHERE p.is_active = 1
          ORDER BY c.category_name, p.product_name, sz.code"
     );
-    $cols = [['Product','t'],['Category','t'],['In stock','i']];
+    $cols = [['Product','t'],['Category','t'],['WH','i'],['Sale','i'],['Total','i']];
     if (is_admin()) { $cols[] = ['Latest cost','m']; $cols[] = ['Stock value','m']; }
-    $units = 0; $value = 0;
+    $uW = $uS = 0; $value = 0;
     foreach ($st->fetchAll() as $p) {
-        $q = $map[(int)$p['product_id']] ?? 0;
-        $row = [$p['nm'], $p['category_name'], $q];
+        $w = $whMap[(int)$p['product_id']] ?? 0;
+        $s = $saleMap[(int)$p['product_id']] ?? 0;
+        $q = $w + $s;
+        $row = [$p['nm'], $p['category_name'], $w, $s, $q];
         if (is_admin()) {
             $cost = $p['cost'] === null ? null : (float)$p['cost'];
             $row[] = $cost;
             $row[] = $cost === null ? null : $cost * max($q, 0);
             $value += (float)$cost * max($q, 0);
         }
-        $units += $q;
+        $uW += $w; $uS += $s;
         $rows[] = $row;
     }
-    $totals = is_admin() ? ['Total', null, $units, null, $value] : ['Total', null, $units];
+    $totals = is_admin() ? ['Total', null, $uW, $uS, $uW + $uS, null, $value] : ['Total', null, $uW, $uS, $uW + $uS];
     break;
 
 case 'foc':
     $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to));
     $st = $conn->prepare(
-        "SELECT f.foc_date, $pname, f.quantity, COALESCE(f.description, ''), u.full_name
+        "SELECT f.foc_date, f.foc_type, $pname, f.quantity, COALESCE(f.description, ''), u.full_name
          FROM foc_records f
          JOIN products p ON p.product_id = f.product_id
          LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
@@ -146,15 +180,17 @@ case 'foc':
          ORDER BY f.foc_date, f.foc_id"
     );
     $st->execute([$from, $to]);
-    $cols = [['Date','d'],['Product','t'],['Qty','i'],['Note','t'],['By','t']];
+    $cols = [['Date','d'],['Type','t'],['Product','t'],['Qty','i'],['Note','t'],['By','t']];
     $rows = $st->fetchAll(PDO::FETCH_NUM);
-    $totals = ['Total', null, array_sum(array_column($rows, 2)), null, null];
+    foreach ($rows as &$row) { $row[1] = $row[1] === 'received' ? 'Received (WH +)' : 'Given (Sale -)'; }
+    unset($row);
+    $totals = ['Total', null, null, array_sum(array_column($rows, 3)), null, null];
     break;
 
 case 'adjust':
     $period = date('d M Y', strtotime($from)) . ' to ' . date('d M Y', strtotime($to));
     $st = $conn->prepare(
-        "SELECT a.adjustment_date, $pname, a.adjustment_type, a.quantity, COALESCE(a.description, ''), u.full_name
+        "SELECT a.adjustment_date, $pname, UPPER(a.location), a.adjustment_type, a.quantity, COALESCE(a.description, ''), u.full_name
          FROM stock_adjustments a
          JOIN products p ON p.product_id = a.product_id
          LEFT JOIN size_types sz ON sz.size_type_id = p.size_type_id
@@ -163,11 +199,11 @@ case 'adjust':
          ORDER BY a.adjustment_date, a.adjustment_id"
     );
     $st->execute([$from, $to]);
-    $cols = [['Date','d'],['Product','t'],['Type','t'],['Change','si'],['Note','t'],['By','t']];
+    $cols = [['Date','d'],['Product','t'],['Location','t'],['Type','t'],['Change','si'],['Note','t'],['By','t']];
     $rows = $st->fetchAll(PDO::FETCH_NUM);
-    foreach ($rows as &$row) { $row[2] = ucfirst($row[2]); }
+    foreach ($rows as &$row) { $row[3] = ucfirst($row[3]); }
     unset($row);
-    $totals = ['Net change', null, null, array_sum(array_column($rows, 3)), null, null];
+    $totals = ['Net change', null, null, null, array_sum(array_column($rows, 4)), null, null];
     break;
 
 case 'profit':
@@ -201,7 +237,7 @@ case 'monthly':
     $end   = date('Y-m-t', strtotime($start));
     $period = date('F Y', strtotime($start));
     $days = [];
-    $blank = ['sales' => 0, 'purch' => 0, 'profit' => 0, 'foc' => 0, 'loss' => 0];
+    $blank = ['sales' => 0, 'purch' => 0, 'profit' => 0, 'foc' => 0, 'foc_in' => 0, 'loss' => 0];
 
     $q = $conn->prepare("SELECT DATE(sale_date) d, SUM(total_amount) t FROM sales WHERE status = 'completed' AND DATE(sale_date) BETWEEN ? AND ? GROUP BY d");
     $q->execute([$start, $end]);
@@ -217,9 +253,9 @@ case 'monthly':
     $q->execute([$start, $end]);
     foreach ($q->fetchAll() as $x) { $days[$x['d']] = ($days[$x['d']] ?? $blank); $days[$x['d']]['profit'] = (float)$x['t']; }
 
-    $q = $conn->prepare('SELECT DATE(foc_date) d, SUM(quantity) t FROM foc_records WHERE DATE(foc_date) BETWEEN ? AND ? GROUP BY d');
+    $q = $conn->prepare("SELECT DATE(foc_date) d, foc_type, SUM(quantity) t FROM foc_records WHERE DATE(foc_date) BETWEEN ? AND ? GROUP BY d, foc_type");
     $q->execute([$start, $end]);
-    foreach ($q->fetchAll() as $x) { $days[$x['d']] = ($days[$x['d']] ?? $blank); $days[$x['d']]['foc'] = (int)$x['t']; }
+    foreach ($q->fetchAll() as $x) { $days[$x['d']] = ($days[$x['d']] ?? $blank); $days[$x['d']][$x['foc_type'] === 'received' ? 'foc_in' : 'foc'] = (int)$x['t']; }
 
     $q = $conn->prepare("SELECT DATE(adjustment_date) d, SUM(ABS(quantity)) t FROM stock_adjustments
                          WHERE adjustment_type IN ('damaged','lost') AND DATE(adjustment_date) BETWEEN ? AND ? GROUP BY d");
@@ -229,20 +265,21 @@ case 'monthly':
     ksort($days);
     $cols = [['Date','t'],['Sales','m'],['Purchases','m']];
     if (is_admin()) $cols[] = ['Profit','m'];
-    $cols[] = ['FOC units','i'];
+    $cols[] = ['FOC received','i'];
+    $cols[] = ['FOC given','i'];
     $cols[] = ['Damaged/Lost units','i'];
 
     $tot = $blank;
     foreach ($days as $d => $v) {
         $row = [date('D, d M', strtotime($d)), $v['sales'], $v['purch']];
         if (is_admin()) $row[] = $v['profit'];
-        $row[] = $v['foc']; $row[] = $v['loss'];
+        $row[] = $v['foc_in']; $row[] = $v['foc']; $row[] = $v['loss'];
         $rows[] = $row;
         foreach ($tot as $k => $_) $tot[$k] += $v[$k];
     }
     $totals = ['Total', $tot['sales'], $tot['purch']];
     if (is_admin()) $totals[] = $tot['profit'];
-    $totals[] = $tot['foc']; $totals[] = $tot['loss'];
+    $totals[] = $tot['foc_in']; $totals[] = $tot['foc']; $totals[] = $tot['loss'];
     break;
 }
 
@@ -311,6 +348,11 @@ $csvUrl = 'reports.php?' . http_build_query($qs + ['r' => $r]) . '&export=csv';
     <input type="hidden" name="r" value="<?= e($r) ?>">
     <?php if ($filterType === 'date'): ?>
         <input type="date" name="date" value="<?= e($date) ?>" max="<?= e($today) ?>">
+        <select name="loc">
+            <?php foreach (STOCK_LOCATIONS as $key => $label): ?>
+                <option value="<?= e($key) ?>" <?= $loc === $key ? 'selected' : '' ?>><?= e($label) ?> stock</option>
+            <?php endforeach; ?>
+        </select>
     <?php elseif ($filterType === 'month'): ?>
         <input type="month" name="month" value="<?= e($month) ?>">
     <?php else: ?>
